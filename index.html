@@ -23,6 +23,7 @@ body{margin:0;color:var(--ink);font:17px/1.7 -apple-system,BlinkMacSystemFont,"S
 main{max-width:46rem;margin:0 auto;padding:3rem 1.25rem 5rem}
 h1{font-size:2.05rem;line-height:1.22;margin:0 0 .5rem;letter-spacing:-.02em}
 h2{font-size:1.33rem;margin:2.5rem 0 .7rem}
+h3{font-size:1.03rem;margin:1.9rem 0 .45rem;letter-spacing:-.01em}
 p,li{color:#2b3038}ul,ol{padding-left:1.3rem}li{margin:.4rem 0}
 a{color:var(--acc)}
 .lede{font-size:1.14rem;color:var(--mut);margin:0 0 1.6rem}
@@ -127,7 +128,9 @@ which handles the mixed case:</p>
   regimes and needs two treatments.</li>
   <li><strong>For mixed images, mask before sharpening.</strong> Sharpen the product region,
   leave the skin region at a lower amplitude. This is one extra mask and it is the only
-  approach that does not compromise both.</li>
+  approach that does not compromise both — with two caveats I measured below: the mask line
+  must sit on a real edge, and a soft per-pixel amount works better than a binary mask at
+  all.</li>
   <li><strong>Never evaluate on the region you tuned.</strong> If you tuned on the product,
   check the face at 100%. The metric that improved is the one you tuned; the one that got
   worse is the one you did not look at.</li>
@@ -145,6 +148,164 @@ does matter, because the viewing distance changes what counts as a hard edge. Th
 different problem with a different calculation, and treating it as "more pixels is better"
 gets the answer wrong in both directions.</p>
 
+<h2>Does masking the two regions actually work?</h2>
+
+<p>Step 2 of the rule above says "mask before sharpening" as if that were the end of the
+story. It is not, and I built a controlled mixed image to find out why. Left half: a
+smooth skin-like surface — a 2D gradient, a soft cheek falloff, three deliberately soft
+arcs with a 1.4-pixel ramp, and σ=2.0 sensor noise. Right half: a product-like panel —
+flat mid-grey, 1-pixel white seams, near-black text bars, one hard outer contour, same
+noise. 1200×800, upscaled 2× with lanczos to 2400×1600, one unsharp mask (5×5, amount
+1.5, gaussian σ=2).
+
+<h3>The two halves are separated by distribution, not by average</h3>
+
+<table>
+<thead><tr><th>Half</th><th class="num">meanGrad</th><th class="num">p99Grad</th>
+<th class="num">blkStd</th><th class="num">flat%</th><th class="num">edge%</th></tr></thead>
+<tbody>
+<tr><td>Smooth (skin-like)</td><td class="num">1.34</td><td class="num">3.3</td>
+<td class="num">1.54</td><td class="num">2.3</td><td class="num">0.00</td></tr>
+<tr><td>Hard (product-like)</td><td class="num">3.99</td><td class="num">60.5</td>
+<td class="num">6.78</td><td class="num">0.2</td><td class="num">2.62</td></tr>
+</tbody>
+</table>
+
+<p>Mean gradient differs 3× here, but that is a property of how much flat area I drew, not
+a law. What is stable is <strong>p99Grad</strong>: 3.3 vs 60.5, a factor of 18. The 99th
+percentile is the quantity that survives a change of framing, which is exactly why it is
+the right classifier and mean gradient is not.</p>
+
+<h3>Finding 1 — the halo gap narrows as you sharpen later in the pipeline</h3>
+
+<p>I ran the identical kernel at three points: on the native image, after a 2× upscale,
+and after a 4× upscale. Same amount, same radius, same content.</p>
+
+<table>
+<thead><tr><th>Sharpened at</th><th class="num">skin p99 gain</th>
+<th class="num">product p99 gain</th><th class="num">gap</th></tr></thead>
+<tbody>
+<tr><td>native 1200×800</td><td class="num">2.224</td><td class="num">1.449</td><td class="num">1.53×</td></tr>
+<tr><td>after 2× lanczos</td><td class="num">2.260</td><td class="num">1.736</td><td class="num">1.30×</td></tr>
+<tr><td>after 4× lanczos</td><td class="num">1.827</td><td class="num">1.546</td><td class="num">1.18×</td></tr>
+</tbody>
+</table>
+
+<p>The gap column is skin gain ÷ product gain. At native resolution the smooth half takes
+<strong>53% more</strong> halo than the hard half. After a 2× upscale it is 30%. After 4×,
+18%. The disparity does not disappear, but it compresses — because the upscaler has already
+smoothed the product edges, so the kernel finds less to over-drive there, while the smooth
+half's p99 is dominated by noise that the kernel amplifies regardless.</p>
+
+<p>Practical consequence, and it is the opposite of the usual advice: if you must apply one
+global preset, apply it <em>after</em> upscaling, not before. The cost of the conflict drops
+from 1.53× to 1.18×. The total sharpening effect also drops (skin gain 2.22 → 1.83), so you
+will need a larger amount — but the <em>ratio</em> between the two regions, which is what
+produces the "this preset is wrong for one of them" feeling, is what improves.</p>
+
+<h3>Finding 2 — a hard mask does not create a brightness step, and that is not the bug</h3>
+
+<p>My first hypothesis was that a binary mask leaves a visible brightness step where the
+sharpened side is brighter than the untouched side. Measured at a mask line drawn through
+pure smooth area, comparing mean luma 25 px either side:</p>
+
+<table>
+<thead><tr><th>Pipeline</th><th class="num">step (levels)</th><th class="num">grain left</th>
+<th class="num">grain right</th><th class="num">grain jump</th></tr></thead>
+<tbody>
+<tr><td>untouched baseline</td><td class="num">4.762</td><td class="num">1.012</td><td class="num">1.026</td><td class="num">1.01×</td></tr>
+<tr><td>global unsharp 1.5</td><td class="num">4.798</td><td class="num">2.583</td><td class="num">2.610</td><td class="num">1.01×</td></tr>
+<tr><td>hard mask, feather 0 px</td><td class="num">4.779</td><td class="num">1.012</td><td class="num">2.610</td><td class="num">2.58×</td></tr>
+<tr><td>feather 8 px</td><td class="num">4.779</td><td class="num">1.012</td><td class="num">2.610</td><td class="num">2.58×</td></tr>
+<tr><td>feather 16 px</td><td class="num">4.779</td><td class="num">1.012</td><td class="num">2.550</td><td class="num">2.52×</td></tr>
+<tr><td>feather 32 px</td><td class="num">4.776</td><td class="num">1.012</td><td class="num">2.233</td><td class="num">2.21×</td></tr>
+</tbody>
+</table>
+
+<p>The step column is flat: 4.762 → 4.779, a change of 0.017 levels out of 255. Unsharp mask
+is a zero-mean filter, so a band that contains no edge gains contrast but no net
+offset. <strong>The brightness-step hypothesis is wrong.</strong> I kept the row in the
+table rather than deleting it, because a hypothesis that failed is still a measurement.</p>
+
+<p>The actual artifact is in the last column. Read the jump as the ratio of grain either
+side of the line: the untouched image is 1.01× (left and right are the same surface), the
+globally sharpened image is also 1.01× — grain is raised <em>everywhere</em>, so there is
+nothing to see at that line. But the hard mask gives <strong>2.58×</strong>: high-pass
+residual σ of 1.012 on the protected side against 2.610 on the sharpened side. That is a
+2.58-fold discontinuity in visible grain sitting in the middle of an otherwise smooth area.
+Your eye picks up a change of texture far more readily than a 0.02-level offset.</p>
+
+<p>Feathering barely helps. Going from a 0 px to a 32 px feather moves the jump from 2.58×
+to 2.21×, and it costs real detail along the way (see the feather warning below). Feathering
+spreads the grain transition over a band, it does not remove it.</p>
+
+<p>So the corollary to "mask before sharpening" is: <strong>the mask boundary must lie on a
+real edge, never inside a smooth region</strong> — a hairline across a cheek is the single
+worst place to put it, and a perfectly good segmentation still produces a visible artifact
+if its contour is drawn there.</p>
+
+<h3>Finding 3 — automatic masking is a tradeoff curve, not 100%/100%</h3>
+
+<p>The obvious objection: hand-masking every product photo does not scale. So I tried to
+derive the mask automatically — gradient magnitude, gaussian-blurred by 16 px, thresholded
+at a percentile, then dilated. The truth mask is known, so coverage can be scored honestly.</p>
+
+<table>
+<thead><tr><th>Threshold</th><th class="num">% sharpened</th><th class="num">product covered</th>
+<th class="num">skin protected</th><th class="num">skin p99 gain</th><th class="num">product p99 gain</th></tr></thead>
+<tbody>
+<tr><td>p90 + 31 px dilate</td><td class="num">17.7</td><td class="num">35.4</td><td class="num">100.0</td><td class="num">1.002</td><td class="num">1.736</td></tr>
+<tr><td><strong>p80 + 51 px</strong></td><td class="num">31.2</td><td class="num">61.0</td><td class="num">98.6</td><td class="num">1.094</td><td class="num">1.736</td></tr>
+<tr><td>p70 + 81 px</td><td class="num">42.8</td><td class="num">80.4</td><td class="num">94.7</td><td class="num">1.417</td><td class="num">1.736</td></tr>
+<tr><td>p60 + 101 px</td><td class="num">63.1</td><td class="num">100.0</td><td class="num">73.8</td><td class="num">1.942</td><td class="num">1.736</td></tr>
+<tr><td>p50 + 121 px</td><td class="num">65.1</td><td class="num">100.0</td><td class="num">69.8</td><td class="num">1.979</td><td class="num">1.736</td></tr>
+</tbody>
+</table>
+
+<p>Look at the two middle columns together. Every row that full-covers the product also
+sharpens 26–30% of the skin; every row that fully protects the skin covers at most 35% of
+the product. There is no threshold that gets both. The best joint setting — p80 — protects
+98.6% of the smooth area while sharpening only <strong>61%</strong> of the hard-edge area.</p>
+
+<p>That 61% is not a failure of tuning, it is the resolution of the goal. A dilated
+gradient mask cannot reach an object's interior, because the interior is flat and flat
+regions look exactly like skin. Any purely local, edge-based mask has this ceiling. Getting
+to 100% requires a semantic segmentation model that knows "this region is a product",
+which is a different piece of software with a different cost.</p>
+
+<h3>Finding 4 — a soft amount beats a binary mask</h3>
+
+<p>Since the binary mask is a hard switch and the artifact is a hard switch, the natural fix
+is to not switch. Instead of masking, scale the sharpening amount per pixel by the blurred
+gradient magnitude — full amount where content is busy, near zero where it is flat.</p>
+
+<table>
+<thead><tr><th>Amount / threshold</th><th class="num">mean amount</th><th class="num">skin p99 gain</th>
+<th class="num">product p99 gain</th><th class="num">skin grain gain</th></tr></thead>
+<tbody>
+<tr><td>1.5 / 0.05</td><td class="num">0.612</td><td class="num">1.320</td><td class="num">1.730</td><td class="num">1.36×</td></tr>
+<tr><td><strong>1.5 / 0.10</strong></td><td class="num">0.372</td><td class="num">1.161</td><td class="num">1.625</td><td class="num">1.18×</td></tr>
+<tr><td>1.5 / 0.20</td><td class="num">0.188</td><td class="num">1.081</td><td class="num">1.432</td><td class="num">1.09×</td></tr>
+<tr><td>1.5 / 0.35</td><td class="num">0.107</td><td class="num">1.047</td><td class="num">1.265</td><td class="num">1.05×</td></tr>
+</tbody>
+</table>
+
+<p>At threshold 0.10 the soft version holds the product at 1.625 — 93.6% of the 1.736 a global
+kernel delivers there — while lifting skin halo to only 1.161 and skin grain to 1.18×.
+Compare with the best binary setting, which held the full 1.736 on 61% of the product and
+1.094 on 98.6% of the skin but left a 2.58× grain step at its boundary. The soft version has
+no boundary at all, which is precisely the point: <strong>the artifact was never caused by
+the mask being in the wrong place, it was caused by the mask existing.</strong></p>
+
+<p>And a warning about feather width that comes out of the same run. Feathering is not
+free — measured as high-pass microcontrast inside the transition band, relative to what a
+global kernel puts there: 1.000 at feather ≤4 px, 0.997 at 16 px, 0.991 at 32 px, then
+<strong>0.876</strong> at 64 px. A 64-pixel feather throws away 12% of the microcontrast in
+a 64-pixel band along every object outline. Feather wide enough to hide the seam and you
+have drawn a soft, wide, unsharp border around the product. If a mask needs more than
+~32 px of feather to look natural, the mask is in the wrong place and no feather value will
+rescue it.</p>
+
 <h2>Reproducing it</h2>
 
 <pre><code># region statistics
@@ -157,6 +318,22 @@ edge_density = (grad &gt; 40).mean()
 # one kernel, three regions
 ffmpeg -i region.png -vf "unsharp=5:5:1.5:5:5:0.0" sharp.png
 # then recompute p99(grad) before/after
+
+# masked / soft-amount sharpening, no ffmpeg needed
+from PIL import Image, ImageFilter
+Lb = np.asarray(Image.fromarray(img_L.astype(np.uint8))
+                .filter(ImageFilter.GaussianBlur(2.0)), dtype=np.float64)
+resid = Lb * 0 + (img_L - Lb)              # zero-mean high-pass residual
+gm    = np.hypot(*np.gradient(img_L))
+gm    = np.asarray(Image.fromarray(np.clip(gm / gm.max() * 255, 0, 255)
+                     .astype(np.uint8)).filter(ImageFilter.GaussianBlur(16)),
+                   dtype=np.float64) / 255.0
+amt   = 1.5 * np.clip(gm / 0.10, 0, 1)     # soft, per-pixel amount
+out   = np.clip(img_L + amt * resid, 0, 255)
+
+# grain onset metric at a mask line x0: high-pass std either side
+hp = img_L - gaussian_blur(img_L, 1.5)
+jump = hp[:, x0+10:x0+40].std() / hp[:, x0-40:x0-10].std()
 </code></pre>
 
 <h2>Try both on one file</h2>
