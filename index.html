@@ -14,6 +14,7 @@
  "author":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
  "publisher":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
  "datePublished":"2026-11-14",
+ "dateModified":"2026-11-15",
  "mainEntityOfPage":"https://celticgemini001.github.io/upgolab-upscale-product-photos/"}
 </script>
 <style>
@@ -45,7 +46,7 @@ footer{margin-top:4rem;padding-top:1.4rem;border-top:1px solid var(--line);font-
 <p class="lede">One preset cannot serve both, and the reason is measurable: the same
 sharpening kernel does 1.63× damage to smooth skin and 1.31× damage to a hard product edge.
 The kernel is identical. The content is not.</p>
-<p class="meta">14 November 2026 · region statistics on a real 1080×1620 image</p>
+<p class="meta">14 November 2026, updated 15 November 2026 · region statistics on a real 1080×1620 image, plus full-resolution pipeline tests</p>
 
 <p>"Which upscale preset should I use?" is usually answered with a list. Portrait for
 faces, product for objects, anime for line art. The lists are not wrong, but they are
@@ -156,7 +157,7 @@ smooth skin-like surface — a 2D gradient, a soft cheek falloff, three delibera
 arcs with a 1.4-pixel ramp, and σ=2.0 sensor noise. Right half: a product-like panel —
 flat mid-grey, 1-pixel white seams, near-black text bars, one hard outer contour, same
 noise. 1200×800, upscaled 2× with lanczos to 2400×1600, one unsharp mask (5×5, amount
-1.5, gaussian σ=2).
+1.5, gaussian σ=2).</p>
 
 <h3>The two halves are separated by distribution, not by average</h3>
 
@@ -335,6 +336,359 @@ out   = np.clip(img_L + amt * resid, 0, 255)
 hp = img_L - gaussian_blur(img_L, 1.5)
 jump = hp[:, x0+10:x0+40].std() / hp[:, x0-40:x0-10].std()
 </code></pre>
+
+<h2>Does sharpening the 4000px master survive the 1000px page?</h2>
+
+<p>Everything above measured damage on a 1080×1620 source. The practical question for a
+product master is one step further back: you deliver 4000×3000, the marketplace renders it
+at 1000px wide, and the intermediate 4000px pixels are never seen by anyone. So is
+sharpening the master even worth doing?</p>
+
+<p>The answer turned out to be more boring than the question, and the boring part is the
+useful part. <strong>Sharpening before a downscale and sharpening after it are the same
+operation</strong> — for every radius I tried, to five decimal places. What differs is not
+<em>where</em> you sharpen but <em>how wide</em>, and a 4× pipeline silently deletes the
+narrow end of that range.</p>
+
+<h3>Setting it up so the numbers mean something</h3>
+
+<p>Scene is analytic and band-limited to 0.45 cyc/display-px, rendered at 1200×900 and
+resampled to 300×225. The bandwidth limit is a premise, not decoration: if the source has no
+energy above the served copy's Nyquist, then a perfect downscale is lossless and every
+difference measured below belongs to the filter, not to aliasing. Verified: 0.0143% of scene
+energy sits above 0.47 cyc/display-px, and a 0.05 cyc sines passes the 4× resampler with
+corr 1.000000 and amplitude ratio 1.000121.</p>
+
+<p>Two things I got wrong on the first pass, both worth stating because both produced
+plausible numbers:</p>
+
+<ul>
+<li><strong>Background gradient read as ringing.</strong> The scene had a 0.09 linear ramp
+across the frame. A box filter cannot ring, yet it reported 1.63% "overshoot" — that was the
+ramp inside the measurement window. With flat plateaux the same box filter reports 0.00%.
+Every overshoot number below uses flat plateaux and the median of the first and last ten
+samples as the plateau value.</li>
+<li><strong>Clipping test that measured nothing.</strong> First clipping scene peaked at
+1.06 but its measurement window sat on a plate that had been averaged back below 1.0, so the
+plate std was 0 and the ratio divided by zero. A ceiling test needs the window to still be
+at the ceiling after the downscale.</li>
+</ul>
+
+<h3>Finding 1 — the order is neutral, exactly</h3>
+
+<p>Sharpen the master with an unsharp radius σ, then downscale 4×. Compare against
+downscaling first, then unsharp with radius σ/4. Identical filter, radius rescaled so the
+two act on the same spatial scale.</p>
+
+<table>
+<thead><tr><th>σ (master px)</th><th>σ (served px)</th><th>low band gain<br>master / served</th><th>high band gain<br>master / served</th><th>edge overshoot<br>master / served</th></tr></thead>
+<tbody>
+<tr><td class="num">0.5</td><td class="num">0.125</td><td class="num">1.0004 / 1.0004</td><td class="num">1.0092 / 1.0092</td><td class="num">8.13 / 8.17%</td></tr>
+<tr><td class="num">1.0</td><td class="num">0.250</td><td class="num">1.0017 / 1.0017</td><td class="num">1.0362 / 1.0362</td><td class="num">10.00 / 10.11%</td></tr>
+<tr><td class="num">2.0</td><td class="num">0.500</td><td class="num">1.0069 / 1.0069</td><td class="num">1.1367 / 1.1367</td><td class="num">16.38 / 16.56%</td></tr>
+<tr><td class="num">4.0</td><td class="num">1.000</td><td class="num">1.0273 / 1.0273</td><td class="num">1.4314 / 1.4314</td><td class="num">30.73 / 30.76%</td></tr>
+<tr><td class="num">8.0</td><td class="num">2.000</td><td class="num">1.1042 / 1.1042</td><td class="num">1.8425 / 1.8425</td><td class="num">45.80 / 45.80%</td></tr>
+</tbody>
+</table>
+
+<p>Band gains agree to <strong>0.000000</strong> on all ten values, and overshoot to within
+0.18 percentage points. That is not a coincidence and not a rounding artifact: a linear
+filter and a linear resampler commute. Sharpen-then-resize is identical to
+resize-then-sharpen-with-a-rescaled-kernel. There is no order to get right.</p>
+
+<p>The 0.18 pp on overshoot is the one place they differ, and it's worth understanding rather
+than dismissing: the two paths quantise the edge transition at different grid densities, so
+the measured peak lands a fraction of a sample apart. It's a measurement effect, not an
+image difference.</p>
+
+<div class="callout">
+<p><strong>What this kills:</strong> the advice "always sharpen at final output size, never
+before." For a downscale, the two are the same. The advice is true for <em>upscales</em> —
+resizing up first and sharpening after is genuinely different, because the resampler invents
+samples and the sharpener then amplifies those inventions. Downstream of a reduction it
+doesn't apply.</p>
+</div>
+
+<h3>Finding 2 — what a 4× reduction does to a radius</h3>
+
+<p>If the order is neutral, the radius is not. Measure the share of the added residual —
+<code>sharpen(master) - master</code> — that survives as a change in the served copy, i.e.
+<code>downscale(sharpen(master)) - downscale(master)</code>.</p>
+
+<table>
+<thead><tr><th>σ (master px)</th><th>2× reduction</th><th>4× reduction</th><th>8× reduction</th></tr></thead>
+<tbody>
+<tr><td class="num">0.5</td><td class="num">55.93%</td><td class="num">37.17%</td><td class="num">30.51%</td></tr>
+<tr><td class="num">1.0</td><td class="num">72.79%</td><td class="num">48.98%</td><td class="num">36.13%</td></tr>
+<tr><td class="num">2.0</td><td class="num">90.53%</td><td class="num">71.19%</td><td class="num">46.67%</td></tr>
+<tr><td class="num">4.0</td><td class="num">97.19%</td><td class="num">88.97%</td><td class="num">63.60%</td></tr>
+<tr><td class="num">8.0</td><td class="num">98.84%</td><td class="num">95.54%</td><td class="num">81.67%</td></tr>
+</tbody>
+</table>
+
+<p>Control: white noise pushed through the same 4× resampler keeps 22.32% of its rms
+(theory for uncorrelated noise is 25%, the gap is the finite Lanczos window). So the ~25–35%
+floor in the narrow-radius column is not a bug — a radius of half a master pixel produces
+mostly energy above the served copy's Nyquist, and a resampler is supposed to delete that.</p>
+
+<p>The practical number: <strong>σ=1.0 master px keeps less than half its work at 4×.</strong>
+If your sharpening preset is a 1px-radius unsharp applied to a 4000px file destined for a
+1000px page, you are paying for 49% of it.</p>
+
+<h3>Finding 3 — three contents, same filter, three different survival rates</h3>
+
+<p>This is the part that connects back to the region argument at the top of the page. Same
+filter, same radius, three measurement windows in one image.</p>
+
+<table>
+<thead><tr><th>σ (master px)</th><th>plate texture</th><th>plate edge</th><th>flat background</th></tr></thead>
+<tbody>
+<tr><td class="num">0.5</td><td class="num">94.33%</td><td class="num">11.12%</td><td class="num">0.02%</td></tr>
+<tr><td class="num">1.0</td><td class="num">94.63%</td><td class="num">20.51%</td><td class="num">—</td></tr>
+<tr><td class="num">2.0</td><td class="num">95.66%</td><td class="num">44.50%</td><td class="num">—</td></tr>
+<tr><td class="num">4.0</td><td class="num">97.97%</td><td class="num">73.66%</td><td class="num">—</td></tr>
+<tr><td class="num">8.0</td><td class="num">99.44%</td><td class="num">88.53%</td><td class="num">—</td></tr>
+</tbody>
+</table>
+
+<p>The texture column is above 94% at every radius because texture is low-frequency by
+construction — it's band-limited to 0.45 cyc/display-px, well inside what survives. The edge
+column starts at 11% and climbs to 89%: an unsharp's work on an edge is concentrated exactly
+at the high frequencies the reduction removes. And the flat column is a division by ~1e-7
+once the residual's rms in that window collapses, so I'm reporting the raw rms rather than a
+ratio I don't trust: <strong>2.1e-06 at σ=0.5, 2.1e-07 at σ=1.0, 3.1e-13 at σ=2.0.</strong>
+A residual of 1e-13 has no meaning in an 8-bit image; the honest reading is that a flat
+region contains nothing for an unsharp to act on, at any radius.</p>
+
+<div class="callout">
+<p><strong>Where the sharpening actually goes:</strong> the texture you wanted to crisp up
+survives at 94–99% because it was never high-frequency to begin with. The 11% is the edge
+halo, which is the thing you didn't want. A 4× pipeline is, on this scene, a halo filter
+that keeps the look and throws away most of the artefact on edges — and throws away the
+edge definition with it.</p>
+</div>
+
+<h3>Finding 4 — the marketplace's resize kernel matters more than your radius</h3>
+
+<p>Same residual, same 4× reduction, three plausible resamplers.</p>
+
+<table>
+<thead><tr><th>Resampler</th><th>σ=2 survival</th><th>σ=8 survival</th></tr></thead>
+<tbody>
+<tr><td>Lanczos-3</td><td class="num">71.19%</td><td class="num">95.54%</td></tr>
+<tr><td>Bilinear</td><td class="num">62.10%</td><td class="num">85.53%</td></tr>
+<tr><td>Box / area average</td><td class="num">57.02%</td><td class="num">73.40%</td></tr>
+</tbody>
+</table>
+
+<p>You don't control this. A CDN that thumbnails with a plain box filter keeps 73% of a
+σ=8 residual where Lanczos keeps 95.5%. Worse, the box baseline has
+<strong>0.00% edge overshoot</strong> before any sharpening — the plate edge arrives as a
+clean step — so overshoot you add is overshoot the viewer sees, undiluted. Under Lanczos the
+baseline already carries 7.49% overshoot, which is why the same radius reads 8.13% there: the
+downscaler's ringing and your sharpening partly occupy the same measurement.</p>
+
+<p>This is the case for keeping radius generous and amount conservative rather than the other
+way round. A wide, low-amount unsharp survives a bad resampler; a narrow, high-amount one
+does not, and the part that doesn't survive is the part that was doing the work.</p>
+
+<h3>Finding 5 — where the order stops being neutral</h3>
+
+<p>If the order is neutral for linear filters, it can only differ where something is
+nonlinear. Two candidates: clipping at the ceiling, and 8-bit rounding.</p>
+
+<p><strong>Clipping.</strong> Plate pushed to 0.985 with 1% texture: 3.07% of master pixels
+clip at the ceiling, 2.17% of served pixels still do after the downscale.</p>
+
+<table>
+<thead><tr><th>σ</th><th>amount</th><th>served pixels at ceiling<br>sharpened at master</th><th>served pixels at ceiling<br>sharpened at served size</th><th>plate std<br>master / served</th></tr></thead>
+<tbody>
+<tr><td class="num">1.0</td><td class="num">1.0</td><td class="num">2.43%</td><td class="num">3.06%</td><td class="num">0.00847 / 0.00846</td></tr>
+<tr><td class="num">1.0</td><td class="num">3.0</td><td class="num">2.94%</td><td class="num">4.24%</td><td class="num">0.00896 / 0.00897</td></tr>
+<tr><td class="num">2.0</td><td class="num">1.0</td><td class="num">3.17%</td><td class="num">4.44%</td><td class="num">0.00907 / 0.00908</td></tr>
+<tr><td class="num">2.0</td><td class="num">3.0</td><td class="num">5.25%</td><td class="num">8.37%</td><td class="num">0.01083 / 0.01090</td></tr>
+<tr><td class="num">4.0</td><td class="num">1.0</td><td class="num">4.83%</td><td class="num">7.68%</td><td class="num">0.01041 / 0.01044</td></tr>
+<tr><td class="num">4.0</td><td class="num">3.0</td><td class="num">9.03%</td><td class="num">15.61%</td><td class="num">0.01463 / 0.01479</td></tr>
+</tbody>
+</table>
+
+<p>Sharpening at master res clips <em>fewer</em> served pixels — 9.03% against 15.61% at
+σ=4, amount 3 — because the master's clipped highlights get averaged with unclipped
+neighbours on the way down, which is a form of recovery the other order can't do. The visible
+difference is real but small: plate std differs by at most 2.02% of the plate's own std. The
+clipping stays local to the highlights you already blew out; it doesn't migrate.</p>
+
+<p><strong>8-bit rounding.</strong> Rounding at the master keeps essentially all of the
+residual measured by rms ratio, and slightly <em>more</em> than 100% because rounding adds its
+own noise and the rms picks that up. The projection metric — projecting the served residual
+onto the ideal one — is the trustworthy one and reads 100.03% at σ=4/amount 1.0, 92.61% at
+amount 2.0. Both agree the 8-bit master is not the bottleneck for anything a viewer would
+call sharpening. Store 16-bit if your pipeline has other reasons; this experiment doesn't
+find one.</p>
+
+<h3>Finding 6 — the radius budget</h3>
+
+<p>Same scene, flat plateaux, lanczos reduction. Overshoot is measured against the clean
+plateau medians, and the unsharpened baseline is <strong>7.49%</strong> — that is the
+downscaler's own ringing, already there before you touch anything.</p>
+
+<table>
+<thead><tr><th>σ (master px)</th><th>σ (served px)</th><th>overshoot</th><th>high band gain</th><th>low band gain</th></tr></thead>
+<tbody>
+<tr><td class="num">0.25</td><td class="num">0.062</td><td class="num">7.65%</td><td class="num">1.0023</td><td class="num">1.0001</td></tr>
+<tr><td class="num">0.50</td><td class="num">0.125</td><td class="num">8.13%</td><td class="num">1.0092</td><td class="num">1.0004</td></tr>
+<tr><td class="num">1.00</td><td class="num">0.250</td><td class="num">10.00%</td><td class="num">1.0362</td><td class="num">1.0017</td></tr>
+<tr><td class="num">1.50</td><td class="num">0.375</td><td class="num">12.85%</td><td class="num">1.0796</td><td class="num">1.0039</td></tr>
+<tr><td class="num">2.00</td><td class="num">0.500</td><td class="num">16.38%</td><td class="num">1.1367</td><td class="num">1.0069</td></tr>
+<tr><td class="num">2.50</td><td class="num">0.625</td><td class="num">20.19%</td><td class="num">1.2042</td><td class="num">1.0108</td></tr>
+<tr><td class="num">3.00</td><td class="num">0.750</td><td class="num">23.97%</td><td class="num">1.2783</td><td class="num">1.0155</td></tr>
+<tr><td class="num">4.00</td><td class="num">1.000</td><td class="num">30.73%</td><td class="num">1.4314</td><td class="num">1.0273</td></tr>
+</tbody>
+</table>
+
+<p>Read the low-band column: at σ=4 you get 1.43× the high band and 1.027× the low band. The
+gain is almost entirely above the served copy's visible frequency — which is precisely the
+band that survives at 88.53% on an edge and 99.44% on texture, and the band where halos live. If the goal is "the product looks
+crisper at 1000px," the high-band number is the wrong target for a 4× reduction: it's
+measuring energy that will partly be deleted and partly become ringing.</p>
+
+<p>Under a +15% overshoot budget the largest usable radius is <strong>σ=1.5 master px
+(0.375 served px)</strong> at 12.85%. Under +20%, σ=2.0 at 16.38%.</p>
+
+<h3>Scale check</h3>
+
+<p>Everything above runs at 1200×900 → 300×225, which is small enough to iterate on. To check
+the ratios aren't an artifact of that, the whole experiment was re-run at 2400×1800 → 600×450:</p>
+
+<table>
+<thead><tr><th>Quantity</th><th>largest difference, 2× scale</th></tr></thead>
+<tbody>
+<tr><td>order-neutrality band gain</td><td class="num">0.01587</td></tr>
+<tr><td>survival %</td><td class="num">4.64 pp</td></tr>
+<tr><td>texture survival %</td><td class="num">0.03 pp</td></tr>
+<tr><td>edge survival %</td><td class="num">4.66 pp</td></tr>
+<tr><td>overshoot %</td><td class="num">0.00 pp</td></tr>
+</tbody>
+</table>
+
+<p>The edge column moves most because an edge window is a small integer number of samples at
+300px wide; the texture and overshoot columns are essentially scale-free. The 0.01587 on
+band gain is below the third decimal of every value in the table above.</p>
+
+<h3>What to actually do with a 4000px product master</h3>
+
+<ol>
+<li><strong>Don't agonise over order.</strong> Sharpen before or after the downscale — after
+rescaling the radius, the difference is 0.000000 on band gain.</li>
+<li><strong>Keep the radius at or above 1.5 master px</strong> (0.375 px at the served
+size) if the file will be reduced 4×. Below that you lose more than half the work.</li>
+<li><strong>Keep the amount low.</strong> A σ=1.5, amount 1.0 unsharp lands at 12.85%
+overshoot against a 7.49% baseline, i.e. +5.36 pp of visible ringing, for 1.0796× high-band
+gain. Doubling the amount doubles the ringing without changing the radius that survives.</li>
+<li><strong>Expect the resampler to eat your halo, not your texture.</strong> Texture survives
+94–99% at every radius; edges survive 11% at σ=0.5. If a preset looks sharp in the 4000px
+preview and soft at 1000px, the part that vanished was edge definition, and the fix is more
+radius, not more amount.</li>
+<li><strong>Nothing here needs 16-bit.</strong> The 8-bit master preserves the sharpening
+residual at 100.03% by projection; rounding noise is measured, not assumed away.</li>
+</ol>
+
+<h2>Reproducing the survival table</h2>
+
+<p>Self-contained: builds the scene, the resampler, the filter, and prints the same numbers as
+Findings 2 and 3. The <code>assert</code> is the premise — if the resampler doesn't preserve
+a constant, none of the ratios below mean anything.</p>
+
+<pre><code>import numpy as np
+DW, DH, R = 300, 225, 4                     # served size and the downscale factor
+MW, MH = DW * R, DH * R                     # master
+EDGE = int(0.30 * DW)                       # plate edge, display px
+rng = np.random.default_rng(20261115)
+n = 200
+f = np.exp(rng.uniform(np.log(0.02), np.log(0.45), n))
+th, ph = rng.uniform(0, 2*np.pi, n), rng.uniform(0, 2*np.pi, n)
+a = rng.uniform(0.5, 1.5, n) / np.sqrt(n)
+fx, fy = f*np.cos(th), f*np.sin(th)
+k = np.hypot(fx, fy) &lt;= 0.45
+fx, fy, ph, a = fx[k], fy[k], ph[k], a[k]
+
+def scene(w, h):
+    y, x = np.mgrid[0:h, 0:w].astype(float)
+    X, Y = (x+0.5)*(DW/w)-0.5, (y+0.5)*(DH/h)-0.5
+    s = 0.5*(1 + np.tanh((X-EDGE)/0.05))
+    t = sum(a[i]*np.sin(2*np.pi*(fx[i]*X + fy[i]*Y) + ph[i]) for i in range(fx.size))
+    return 0.24 + 0.46*s + 0.055*t*s        # flat plateaux: no gradient
+
+def weights(nin, nout, tap=3):
+    r, sc = nin/nout, max(1.0, nin/nout)
+    W = np.zeros((nout, nin))
+    for i in range(nout):
+        c = (i+0.5)*r - 0.5
+        js = np.arange(int(c-tap*sc)-1, int(c+tap*sc)+2)
+        d = (js - c)/sc
+        w = np.where(np.abs(d) &lt; tap, np.sinc(d)*np.sinc(d/tap), 0.0)
+        np.add.at(W[i], np.clip(js, 0, nin-1), w/w.sum())
+    return W
+
+WX, WY = weights(MW, DW), weights(MH, DH)
+down = lambda im: (WY @ im) @ WX.T
+assert np.allclose(down(np.ones((MH, MW))), 1.0)   # premise, asserted
+
+def unsharp(im, sig, amt=1.0):
+    fy_ = np.fft.fftfreq(im.shape[0])[:, None]
+    fx_ = np.fft.fftfreq(im.shape[1])[None, :]
+    H = np.exp(-2*np.pi**2 * sig**2 * (fx_**2 + fy_**2))
+    return im + amt*(im - np.real(np.fft.ifft2(np.fft.fft2(im)*H)))
+
+rms = lambda z: float(np.sqrt((np.asarray(z)**2).mean()))
+M = scene(MW, MH)
+base = down(M)
+print("sigma_master  survived   texture   edge")
+for s in (0.5, 1.0, 2.0, 4.0, 8.0):
+    sh = unsharp(M, s)
+    rb, ra = sh - M, down(sh) - base
+    surv = rms(ra)/rms(rb)*100
+    tex  = rms(ra[90:162, 126:225])/rms(rb[360:648, 504:900])*100
+    edg  = rms(ra[94:191,  60:120])/rms(rb[376:764, 240:480])*100
+    print(f"{s:&lt;13} {surv:6.2f}%   {tex:6.2f}%  {edg:6.2f}%")
+</code></pre>
+
+<p>Output on this machine, matching Findings 2 and 3 row for row:</p>
+
+<pre><code>sigma_master  survived   texture   edge
+0.5            37.17%    94.33%   11.12%
+1.0            48.98%    94.63%   20.51%
+2.0            71.19%    95.66%   44.50%
+4.0            88.97%    97.97%   73.66%
+8.0            95.54%    99.44%   88.53%</code></pre>
+
+<h3>Five things I had to fix to get here</h3>
+
+<ol>
+<li><strong>A gradient in the scene counted as overshoot.</strong> 0.09 ramp across the frame
+gave a box filter 1.63% overshoot, which is impossible for a box. Fixed by generating flat
+plateaux; the box filter then reads 0.00% and the unsharpened Lanczos baseline reads 7.49% —
+the downscaler's real ringing, isolated.</li>
+<li><strong>A clipping test where nothing was clipped in the window.</strong> Plate at 1.06
+but the measurement window had been averaged below the ceiling, plate std 0, division by
+zero. Fixed by putting the window where the ceiling survives (2.17% of served pixels) and by
+choosing 0.985/1% texture so the test isn't saturating the whole frame.</li>
+<li><strong>8-bit arm measured without rounding.</strong> The first version computed the
+"8-bit" residual as if the sharpened master were still float, which is the thing being
+tested. Fixed: round through <code>np.round(clip(x,0,1)*255)/255</code> after the filter, then
+rescale.</li>
+<li><strong>Content boxes cropped in the wrong coordinate system.</strong> Master-side boxes
+must be multiplied by R; the first run cropped the master at display coordinates and reported
+survival rates of 1e16%. Fixed — and the giveaway was that a rate above 100% is impossible
+for a reduction.</li>
+<li><strong>rms ratio above 100% on the 8-bit arm.</strong> Rounding adds noise, so rms sees
+more residual, not less. That's why the 8-bit conclusion uses projection onto the ideal
+residual rather than a norm ratio.</li>
+</ol>
+
+<p>The pattern: three of these five produced numbers inside the plausible range. Only the
+impossible ones (1e16%, division by zero) announced themselves. The gradient one was caught
+by asking what a filter that <em>cannot</em> ring would measure.</p>
 
 <h2>Try both on one file</h2>
 
